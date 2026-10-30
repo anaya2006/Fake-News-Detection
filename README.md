@@ -87,13 +87,13 @@ This project can:
 This project does **not**:
 
 - Prove whether a claim is true or false
-- Search the web or retrieve supporting evidence
+- Judge whether news or reference passages *support or contradict* a claim (it only reports matching fact-checks and related coverage)
 - Replace professional fact-checkers
 - Detect all types of misinformation
 - Guarantee real-world accuracy on unseen sources
 - Make high-stakes moderation or censorship decisions
 
-A real fact-checking system would need claim extraction, evidence retrieval, source-credibility analysis, external databases, and human review.
+A real fact-checking system would need claim extraction, evidence retrieval, stance detection, source-credibility analysis, external databases, and human review. The **Evidence** tab implements a cautious first slice of this; see below.
 
 ---
 
@@ -108,7 +108,7 @@ A real fact-checking system would need claim extraction, evidence retrieval, sou
 - **Leakage-controlled training** via source-artifact stripping
 - **Out-of-source evaluation** that runs when the data permits and reports infeasibility when it does not
 - **Checksum-verified model loading** with SHA-256 sidecars
-- **Streamlit dashboard** for interactive style-risk analysis
+- **Streamlit dashboard** with exact word-level explanations, batch scoring, and diagnostics
 - **Command-line inference** with JSON output
 - **Unit tests and GitHub Actions CI**
 - **Model card, data statement, and security documentation**
@@ -144,16 +144,21 @@ Dashboard and command-line review
 ```text
 Fake-News-Detector/
 │
+├── .streamlit/
+│   └── config.toml
+│
 ├── .github/
 │   └── workflows/
 │       └── ci.yml
 │
 ├── data/
 │   ├── True.csv
-│   └── Fake.csv
+│   ├── Fake.csv
+│   └── eval/claims_seed.csv
 │
 ├── docs/
 │   ├── data_statement.md
+│   ├── evaluation.md
 │   ├── model_card.md
 │   └── security.md
 │
@@ -178,7 +183,12 @@ Fake-News-Detector/
 ├── src/
 │   ├── detect_fake_news.py
 │   ├── evaluation.py
+│   ├── eval_claims.py
+│   ├── explain.py
 │   ├── model_compat.py
+│   ├── retrieval/
+│   │   ├── claims.py, credibility.py, models.py, pipeline.py
+│   │   ├── providers.py, rank.py, textutil.py, source_tiers.json
 │   ├── streamlit_app.py
 │   ├── text_clean.py
 │   └── train_model.py
@@ -186,9 +196,13 @@ Fake-News-Detector/
 ├── tests/
 │   ├── test_cli_predict.py
 │   ├── test_evaluation.py
+│   ├── test_eval_claims.py
+│   ├── test_explain.py
+│   ├── test_retrieval.py
 │   ├── test_model_compat.py
 │   ├── test_pipeline.py
 │   ├── test_text_clean.py
+│   ├── test_streamlit_app.py
 │   └── test_training_smoke_artifacts.py
 │
 ├── README.md
@@ -376,17 +390,40 @@ Launch the app:
 streamlit run src/streamlit_app.py
 ```
 
-The dashboard helps review:
+The dashboard has three tabs:
 
-- the predicted `REAL` / `FAKE` / `UNCERTAIN` label
-- the fake-style probability and confidence guidance
-- the decision rule and adjustable threshold and uncertainty band
-- holdout metrics from the trained model
-- a responsible-use warning for short or ambiguous inputs
+- **Analyze**: verdict card, a decision-band bar showing where the score falls relative to the `UNCERTAIN` zone, and a **marker-pen view** of your text. Words that push the score toward FAKE-style or REAL-style are highlighted by weight.
+- **Batch**: upload a CSV, pick the text column, score up to 5,000 rows, and download the results.
+- **Diagnostics**: the source-confounding score, the "contains Reuters" baseline, holdout metrics, and the evaluation charts, next to each other so the score can be read in context.
+
+Explanations are **exact, not approximated**: for a linear model, log-odds = bias + sum of (TF-IDF weight x coefficient) per term, and the app shows that sum reconciling to the displayed probability. It also warns when the input contains publisher markers (`Reuters`, `Getty Images`, `featured image`, `pic.twitter.com`) that almost perfectly track one class in the bundled dataset.
+
+The UNCERTAIN band, threshold, and a responsible-use warning remain adjustable and visible in the sidebar.
 
 <div align="center">
 <img width="676" alt="Streamlit dashboard" src="https://github.com/user-attachments/assets/cfd823d0-27a3-415b-8d96-7b2bcb274098" />
 </div>
+
+---
+
+## Evidence Retrieval (claim-level)
+
+The **Evidence** tab extracts the text's most check-worthy claims and looks for existing fact-checks and related coverage:
+
+| Source | Needs a key? | Gives |
+|---|---|---|
+| Google Fact Check Tools | Yes (`GOOGLE_FACTCHECK_API_KEY`) | Published fact-checks and their ratings |
+| Wikipedia | No | Background reference passages |
+| GDELT | No | Recent headlines, to see whether outlets cover a topic |
+
+A verdict (`FACT_CHECKED_FALSE/TRUE/MIXED`) appears **only** when a fact-check closely matches the claim, including its assertion terms and not just shared names. Otherwise the result is `RELATED_COVERAGE` (stance not judged) or `NOT_ENOUGH_EVIDENCE`. The style-risk signal and the evidence signal are shown side by side and deliberately **not merged** into one score.
+
+```bash
+export GOOGLE_FACTCHECK_API_KEY=your_key   # optional; Wikipedia and GDELT work without it
+streamlit run src/streamlit_app.py
+```
+
+Design notes: standard library only; every network call goes through an injectable fetcher (tests run offline); responses are cached in `.cache/retrieval/` and the API key is never part of a cache key; provider failures degrade gracefully; source weights are an editable list in `src/retrieval/source_tiers.json`. Matching is lexical and will miss paraphrases. Measure it with `src/eval_claims.py` (see `docs/evaluation.md`).
 
 ---
 
@@ -511,7 +548,8 @@ The project separates responsibilities across modules:
 | `src/evaluation.py` | Source-confounding diagnostic and out-of-source holdout |
 | `src/model_compat.py` | Checksum integrity checks and cross-version loading repairs |
 | `src/detect_fake_news.py` | Command-line inference with REAL / FAKE / UNCERTAIN output |
-| `src/streamlit_app.py` | Interactive dashboard for style-risk analysis |
+| `src/explain.py` | Exact per-term log-odds explanations, text highlighting, publisher-marker detection |
+| `src/streamlit_app.py` | Interactive dashboard: analysis, batch scoring, diagnostics |
 
 </div>
 
@@ -568,6 +606,8 @@ Potential next improvements:
 - Add calibration metrics such as Brier score and reliability plots
 - Add SHAP or feature-importance explanations
 - Add Docker support and deploy the dashboard
+- Add a stance (NLI) model so news/reference passages can support or contradict claims
+- Build a larger dated, publisher-split claim set and tune the retrieval thresholds on it
 - Explore stronger NLP models
 - Add out-of-distribution detection
 
